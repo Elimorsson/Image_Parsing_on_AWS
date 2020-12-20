@@ -1,8 +1,7 @@
 package worker;
+//region imports
 
 import software.amazon.awssdk.regions.Region;
-import software.amazon.awssdk.services.ec2.Ec2Client;
-import software.amazon.awssdk.services.ec2.model.*;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.*;
 import software.amazon.awssdk.services.sqs.model.UnsupportedOperationException;
@@ -10,32 +9,76 @@ import software.amazon.awssdk.services.sqs.model.UnsupportedOperationException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+//endregion imports
 
-public class Worker {
+/**
+ * Class in charge of the work flow of the worker flow:
+ * 1. Take an url to parse from the tasks to do queue
+ * 2. parse it with the OCRParser class
+ * 3. send result to manager
+ * and repeat stage 1-3 until termination
+ */
+public class Worker implements Runnable {
 
-    public static final String WOKERS_SQS = "TO_DO_QUEUE"; // sqs for workers
+    /**
+     * String constant of the name of the queue to take tasks from
+     */
+    public static final String WORKERS_SQS = "TO_DO_QUEUE"; // sqs for workers
+    /**
+     * String constant of the name of the queue to send completed task to
+     */
     public static final String WORKERS_TO_MANAGER_SQS = "COMPLETED_IMAGES_QUEUE"; // sqs for MANAGER to get messages from workers
+    /**
+     * String constant of the region of AWS services
+     */
     public static final Region REGION = Region.US_EAST_1;
-    public static final int IMAGE_PARSING_TIME_OUT_IN_SEC = 300;
-
-
+    /**
+     * integer represents the time in seconds before the message the worker took from the queue become visible to hte other workers again
+     */
+    public static final int IMAGE_PARSING_TIME_OUT_IN_SEC = 200;
+    /**
+     * String : attribute name of the parsed text in sqs message
+     */
     public static final String PARSED_TEXT = "parsedText";
+    /**
+     * String: attribute name of the id of the local application the url belong to
+     */
     public static final String LOCAL_ID = "localID";
+    /**
+     * String: attribute name of the Image url to send in sqs message
+     */
     public static final String IMAGE_URL = "imageUrl";
-
+    /**
+     * String: url of the tasks to do queue in SQS
+     */
     private String queueWorkersUrl;
+    /**
+     * String: url of the completed tasks queue
+     */
     private String queueWorkersToManagersUrl;
+    /**
+     * sqs Client to get and send messages.
+     */
     private SqsClient sqs;
+    /**
+     * OCR object to parse images url to text from image
+     */
     private OCRParser ocrWorker;
 
+    /**
+     * Constructor for the Worker Object
+     */
     public Worker() {
         this.ocrWorker = new OCRParser();
     }
 
+    /**
+     * initializing all aws object and urls to establish communication
+     */
     private void init() {
         this.sqs = SqsClient.builder().region(REGION).build();
         GetQueueUrlRequest getWorkersQueueRequest = GetQueueUrlRequest.builder()
-                .queueName(WOKERS_SQS)
+                .queueName(WORKERS_SQS)
                 .build();
         this.queueWorkersUrl = sqs.getQueueUrl(getWorkersQueueRequest).queueUrl();
         GetQueueUrlRequest getWorkersToManagerQueueRequest = GetQueueUrlRequest.builder()
@@ -45,34 +88,44 @@ public class Worker {
 
     }
 
+    /**
+     * main worker task loop :
+     * 1. Take an url to parse from the tasks to do queue
+     * 2. parse it with the OCRParser class
+     * 3. send result to manager
+     * and repeat stage 1-3 until termination
+     */
     public void run() {
+        //initializing
         init();
+        //repeat until termination
         while (true) {
             // checking for tasks from messages queues
             ReceiveMessageRequest receiveMessagesFromManager = ReceiveMessageRequest.builder()
                     .queueUrl(queueWorkersUrl)
                     .visibilityTimeout(IMAGE_PARSING_TIME_OUT_IN_SEC)
                     .maxNumberOfMessages(1)
+                    .messageAttributeNames("All")
                     .build();
             List<Message> tasksFromManager = this.sqs.receiveMessage(receiveMessagesFromManager).messages();
             for (Message msg : tasksFromManager) {
                 // suppose to only one message if at all
 
-                Map<String, String> givenAttributes = msg.attributesAsStrings();
-                String localId = givenAttributes.get(LOCAL_ID);
-                String imagerUrl = givenAttributes.get(IMAGE_URL);
+                Map<String, MessageAttributeValue> givenAttributes = msg.messageAttributes();
+                String localId = givenAttributes.get(LOCAL_ID).stringValue();
+                String imagerUrl = givenAttributes.get(IMAGE_URL).stringValue();
                 // parsing image
-                String parsedText = this.ocrWorker.newImageTaskWithTessaract(imagerUrl,localId);
+                String parsedText = this.ocrWorker.newImageTaskWithTessaract(imagerUrl, localId);
 
                 // after image is proccessed-> sending result to manager
                 Map<String, MessageAttributeValue> attr = new HashMap<>();
-                attr.put(LOCAL_ID, MessageAttributeValue.builder().stringValue(localId).build());
-                attr.put(IMAGE_URL, MessageAttributeValue.builder().stringValue(imagerUrl).build());
-                attr.put(PARSED_TEXT, MessageAttributeValue.builder().stringValue(parsedText).build());
+                attr.put(LOCAL_ID, MessageAttributeValue.builder().dataType("String").stringValue(localId).build());
+                attr.put(IMAGE_URL, MessageAttributeValue.builder().dataType("String").stringValue(imagerUrl).build());
+                attr.put(PARSED_TEXT, MessageAttributeValue.builder().dataType("String").stringValue(parsedText).build());
                 boolean success = false;
                 long startTime = System.currentTimeMillis();
                 // if didn't succeed yet, and time out hasn't come yet
-                while (!success && System.currentTimeMillis() - startTime > 100000) {
+                while (!success && System.currentTimeMillis() - startTime < 100000) {
                     try {
                         SendMessageRequest sendMessageRequest = SendMessageRequest.builder()
                                 .queueUrl(queueWorkersToManagersUrl)
@@ -81,6 +134,7 @@ public class Worker {
                                 .delaySeconds(5)
                                 .build();
                         SendMessageResponse response = sqs.sendMessage(sendMessageRequest);
+                        System.out.println("url " + imagerUrl + " is done and sent message to sqs " + WORKERS_TO_MANAGER_SQS);
                         if (response.sdkHttpResponse().isSuccessful()) {
                             success = true;
                             DeleteMessageRequest deleteMessageRequest = DeleteMessageRequest.builder()
@@ -99,188 +153,5 @@ public class Worker {
 
         }
     }
-
-
-
-
-// region old
-
-//    private static void oldMain(String[] args) {
-//        if (args.length < 1) {
-//            System.out.println("AWS key must be inserted");
-//            return;
-//        }
-//
-//        String awsKey = args[0];
-//        while (true) {
-//            String url = getNextmessage();
-//
-//            if (url.equals("terminate")) {
-//                return;
-//            }
-//
-//            OCRParser w = new OCRParser();
-//            String output = w.newImageTaskWithTessaract(url);
-//
-//            putProccessedDataInBacket(url, output);
-//        }
-//
-//
-//    }
-
-//
-//    public static void putProccessedDataInBacket(String url, String output) {
-//        //todo
-//    }
-//
-//    public static String getNextmessage() {
-//        //todo get link from s3
-//        String url = "not real url";
-//        return url;
-//    }
-//
-//    private static void createBucket(String bucket, Region region) {
-//        s3.createBucket(CreateBucketRequest
-//                .builder()
-//                .bucket(bucket)
-//                .createBucketConfiguration(
-//                        CreateBucketConfiguration.builder()
-//                                .locationConstraint(region.id())
-//                                .build())
-//                .build());
-//
-//        System.out.println(bucket);
-//    }
-//
-//    /**
-//     * Uploading an object to S3 in parts
-//     */
-//    private static void multipartUpload(String bucketName, String key) throws IOException {
-//
-//        int mb = 1024 * 1024;
-//        // First create a multipart upload and get upload id
-//        CreateMultipartUploadRequest createMultipartUploadRequest = CreateMultipartUploadRequest.builder()
-//                .bucket(bucketName).key(key)
-//                .build();
-//        CreateMultipartUploadResponse response = s3.createMultipartUpload(createMultipartUploadRequest);
-//        String uploadId = response.uploadId();
-//        System.out.println(uploadId);
-//
-//        // Upload all the different parts of the object
-//        UploadPartRequest uploadPartRequest1 = UploadPartRequest.builder().bucket(bucketName).key(key)
-//                .uploadId(uploadId)
-//                .partNumber(1).build();
-//        String etag1 = s3.uploadPart(uploadPartRequest1, RequestBody.fromByteBuffer(getRandomByteBuffer(5 * mb))).eTag();
-//        CompletedPart part1 = CompletedPart.builder().partNumber(1).eTag(etag1).build();
-//
-//        UploadPartRequest uploadPartRequest2 = UploadPartRequest.builder().bucket(bucketName).key(key)
-//                .uploadId(uploadId)
-//                .partNumber(2).build();
-//        String etag2 = s3.uploadPart(uploadPartRequest2, RequestBody.fromByteBuffer(getRandomByteBuffer(3 * mb))).eTag();
-//        CompletedPart part2 = CompletedPart.builder().partNumber(2).eTag(etag2).build();
-//
-//
-//        // Finally call completeMultipartUpload operation to tell S3 to merge all uploaded
-//        // parts and finish the multipart operation.
-//        CompletedMultipartUpload completedMultipartUpload = CompletedMultipartUpload.builder().parts(part1, part2).build();
-//        CompleteMultipartUploadRequest completeMultipartUploadRequest =
-//                CompleteMultipartUploadRequest.builder().bucket(bucketName).key(key).uploadId(uploadId)
-//                        .multipartUpload(completedMultipartUpload).build();
-//        s3.completeMultipartUpload(completeMultipartUploadRequest);
-//    }
-//
-//    private static ByteBuffer getRandomByteBuffer(int size) throws IOException {
-//        byte[] b = new byte[size];
-//        new Random().nextBytes(b);
-//        return ByteBuffer.wrap(b);
-//    }
-//
-//
-//    private static void checkImageParsing() {
-//        OCRParser w = new OCRParser();
-//        String[] arr = new String[]{
-//                "http://ct.mob0.com/Fonts/CharacterMap/ocraextended.png",
-//                "http://www.columbiamt.com/CMT-Marking-Stamps/images/OCR-A-Font.gif",
-//                "http://files.microscan.com/Technology/OCR/ocr_font_examples.jpg",
-//                "http://www.idautomation.com/ocr-a-and-ocr-b-fonts/new_sizes_ocr.png",
-//                "http://www.barcodesoft.com/barcode-image/ocrbrep.png",
-//                "http://www.selectric.org/selectric/fonts/ansi-ocr.gif",
-//                "http://luc.devroye.org/OCR-A-Comparison-2009.jpg",
-//                "http://www.identifont.com/samples/bitstream/OCRA.gif",
-//                "http://www.columbiamt.com/CMT-Marking-Stamps/images/OCR-A-Font.gif",
-//                "http://files.microscan.com/Technology/OCR/ocr_font_examples.jpg",
-//                "http://www.idautomation.com/ocr-a-and-ocr-b-fonts/new_sizes_ocr.pnghttp://ct.mob0.com/Fonts/CharacterMap/ocraextended.png",
-//                "http://www.columbiamt.com/CMT-Marking-Stamps/images/OCR-A-Font.gif",
-//                "http://files.microscan.com/Technology/OCR/ocr_font_examples.jpg",
-//                "http://www.idautomation.com/ocr-a-and-ocr-b-fonts/new_sizes_ocr.png",
-//                "http://www.barcodesoft.com/barcode-image/ocrbrep.png",
-//                "http://www.selectric.org/selectric/fonts/ansi-ocr.gif",
-//                "http://luc.devroye.org/OCR-A-Comparison-2009.jpg",
-//                "http://www.identifont.com/samples/bitstream/OCRA.gif",
-//                "http://www.columbiamt.com/CMT-Marking-Stamps/images/OCR-A-Font.gif",
-//                "http://files.microscan.com/Technology/OCR/ocr_font_examples.jpg",
-//                "http://www.idautomation.com/ocr-a-and-ocr-b-fonts/new_sizes_ocr.png",
-//                "http://www.barcodesoft.com/barcode-image/ocrbrep.png",
-//                "http://www.selectric.org/selectric/fonts/ansi-ocr.gif",
-//                "http://luc.devroye.org/OCR-A-Comparison-2009.jpg",
-//                "http://www.identifont.com/samples/bitstream/OCRA.gif",
-//                "http://ct.mob0.com/Fonts/CharacterMap/ocraextended-Character-Map.png",
-//                "http://files.microscan.com/Technology/OCR/ocr_font_examples.jpg",
-//                "http://www.idautomation.com/ocr-a-and-ocr-b-fonts/new_sizes_ocr.png",
-//                "http://www.barcodesoft.com/barcode-image/ocrbrep.png",
-//                "http://www.selectric.org/selectric/fonts/ansi-ocr.gif",
-//                "http://luc.devroye.org/OCR-A-Comparison-2009.jpg",
-//                "http://www.identifont.com/samples/bitstream/OCRA.gif",
-//                "http://ct.mob0.com/Fonts/CharacterMap/ocraextended-Character-Map.png",
-//                "http://www.barcodesoft.com/barcode-image/ocramapping.jpg",
-//                "http://www.barcodesoft.com/barcode-image/ocrbrep.png",
-//                "http://www.selectric.org/selectric/fonts/ansi-ocr.gif",
-//                "http://luc.devroye.org/OCR-A-Comparison-2009.jpg",
-//                "http://www.identifont.com/samples/bitstream/OCRA.gif",
-//                "http://ct.mob0.com/Fonts/CharacterMap/ocraextended-Character-Map.png",
-//                "http://files.microscan.com/Technology/OCR/ocr_font_examples.jpg",
-//                "http://www.idautomation.com/ocr-a-and-ocr-b-fonts/new_sizes_ocr.png",
-//                "http://www.barcodesoft.com/barcode-image/ocrbrep.png",
-//                "http://www.selectric.org/selectric/fonts/ansi-ocr.gif",
-//                "http://luc.devroye.org/OCR-A-Comparison-2009.jpg",
-//                "http://www.identifont.com/samples/bitstream/OCRA.gif",
-//                "http://ct.mob0.com/Fonts/CharacterMap/ocraextended-Character-Map.png",
-//                "http://www.barcodesoft.com/barcode-image/ocramapping.jpg"
-//        };
-//
-//        Map<String, String> urlsWithParsing = new HashMap<>();
-//        for (String url : arr) {
-//            System.out.println();
-//            String parsed = w.newImageTaskWithTessaract(url);
-//            urlsWithParsing.put(url, parsed);
-//        }
-//        HtmlParserTemp htmlParserTemp = new HtmlParserTemp();
-//        htmlParserTemp.parseListOfUrlAndTextToHTML(urlsWithParsing, "long_file");
-//    }
-//}
-
-
-//        Region region = Region.US_WEST_2;
-//        s3 = S3Client.builder().region(region).build();
-//
-//
-//        String bucket = "bucket" + System.currentTimeMillis();
-//        String bucketKey = "b_key";
-//
-//        createBucket(bucket, region);
-//
-//        // Put Object
-//        try {
-//            s3.putObject(PutObjectRequest.builder().bucket(bucket).key(bucketKey)
-//                            .build(),
-//                    RequestBody.fromByteBuffer(getRandomByteBuffer(10_000)));
-//
-//            // Multipart Upload a file
-//            String multipartKey = "multiPartKey";
-//            multipartUpload(bucket, multipartKey);
-//
-//        } catch (IOException e) {
-//
-    // endregion old
 }
 
