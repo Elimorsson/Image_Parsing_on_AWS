@@ -38,6 +38,12 @@
 <!--        </dependency>-->
 
         <dependency>
+            <groupId>com.github.xmlet</groupId>
+            <artifactId>htmlflow</artifactId>
+            <version>3.5</version>
+        </dependency>
+
+        <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>sqs</artifactId>
         </dependency>
@@ -48,6 +54,7 @@
         <maven.compiler.target>1.8</maven.compiler.target>
     </properties>
     <build>
+
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
